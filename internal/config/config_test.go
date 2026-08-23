@@ -1,4 +1,4 @@
-package config_test
+﻿package config_test
 
 import (
 	"strings"
@@ -36,16 +36,17 @@ func TestLoadFromAppliesDefaults(t *testing.T) {
 
 func TestLoadFromParsesOverrides(t *testing.T) {
 	cfg, err := config.LoadFrom(lookupFrom(map[string]string{
-		"CUTVIDEO_HTTP_ADDR":            "127.0.0.1:9099",
-		"CUTVIDEO_SESSION_TTL":          "45m",
-		"CUTVIDEO_RENDER_LEASE_TTL":     "90s",
-		"CUTVIDEO_RENDER_MAX_ATTEMPTS":  "5",
-		"CUTVIDEO_RENDER_PRESETS":       "proxy_540p, web_1080p",
-		"CUTVIDEO_WORKER_CONCURRENCY":   "4",
-		"CUTVIDEO_WORKER_ENABLED":       "false",
-		"CUTVIDEO_ASSET_RETENTION":      "48h",
-		"CUTVIDEO_MEDIA_FORMATS":        "mov,mxf",
-		"CUTVIDEO_RENDER_RETRY_BACKOFF": "3s",
+		"CUTVIDEO_HTTP_ADDR":                   "127.0.0.1:9099",
+		"CUTVIDEO_SESSION_TTL":                 "45m",
+		"CUTVIDEO_RENDER_LEASE_TTL":            "90s",
+		"CUTVIDEO_RENDER_MAX_ATTEMPTS":         "5",
+		"CUTVIDEO_RENDER_PRESETS":              "proxy_540p, web_1080p",
+		"CUTVIDEO_WORKER_CONCURRENCY":          "4",
+		"CUTVIDEO_WORKER_ENABLED":              "false",
+		"CUTVIDEO_WORKER_LEASE_RENEW_INTERVAL": "20s",
+		"CUTVIDEO_ASSET_RETENTION":             "48h",
+		"CUTVIDEO_MEDIA_FORMATS":               "mov,mxf",
+		"CUTVIDEO_RENDER_RETRY_BACKOFF":        "3s",
 	}))
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -62,7 +63,7 @@ func TestLoadFromParsesOverrides(t *testing.T) {
 	if len(cfg.Render.Presets) != 2 || cfg.Render.Presets[1] != "web_1080p" {
 		t.Fatalf("preset list not trimmed: %#v", cfg.Render.Presets)
 	}
-	if cfg.Worker.Enabled || cfg.Worker.Concurrency != 4 {
+	if cfg.Worker.Enabled || cfg.Worker.Concurrency != 4 || cfg.Worker.LeaseRenewInterval != 20*time.Second {
 		t.Fatalf("unexpected worker config %+v", cfg.Worker)
 	}
 	if cfg.Media.Retention != 48*time.Hour {
@@ -82,6 +83,12 @@ func TestLoadFromRejectsBadValues(t *testing.T) {
 	}
 	if _, err := config.LoadFrom(lookupFrom(map[string]string{"CUTVIDEO_RENDER_PRESETS": " , "})); err == nil {
 		t.Fatal("an empty preset list must fail validation")
+	}
+	if _, err := config.LoadFrom(lookupFrom(map[string]string{
+		"CUTVIDEO_RENDER_LEASE_TTL":            "20s",
+		"CUTVIDEO_WORKER_LEASE_RENEW_INTERVAL": "40s",
+	})); err == nil {
+		t.Fatal("a lease renew interval longer than the lease ttl must fail validation")
 	}
 }
 

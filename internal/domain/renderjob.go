@@ -177,6 +177,7 @@ func (j *RenderJob) ExtendLease(leaseTTL time.Duration, now time.Time) error {
 	}
 	expiry := now.Add(leaseTTL)
 	j.LeaseExpiresAt = &expiry
+	j.RowVersion++
 	j.UpdatedAt = now
 	return nil
 }

@@ -1,4 +1,4 @@
-package app_test
+﻿package app_test
 
 import (
 	"bytes"
@@ -41,13 +41,14 @@ type harness struct {
 }
 
 type harnessOptions struct {
-	renderer  worker.Renderer
-	transport *delivery.StubTransport
-	dsn       string
-	maxTries  int
-	backoff   time.Duration
-	leaseTTL  time.Duration
-	randomIDs bool
+	renderer   worker.Renderer
+	transport  *delivery.StubTransport
+	dsn        string
+	maxTries   int
+	backoff    time.Duration
+	leaseTTL   time.Duration
+	leaseRenew time.Duration
+	randomIDs  bool
 }
 
 func testConfig(dsn string, opts harnessOptions) config.Config {
@@ -71,10 +72,11 @@ func testConfig(dsn string, opts harnessOptions) config.Config {
 			Presets:      []string{"proxy_540p", "web_1080p", "master_2160p"},
 		},
 		Worker: config.WorkerConfig{
-			Enabled:      false,
-			Concurrency:  1,
-			PollInterval: 10 * time.Millisecond,
-			ReaperPeriod: time.Second,
+			Enabled:            false,
+			Concurrency:        1,
+			PollInterval:       10 * time.Millisecond,
+			LeaseRenewInterval: 20 * time.Second,
+			ReaperPeriod:       time.Second,
 		},
 		Media: config.MediaConfig{
 			Retention:      240 * time.Hour,
@@ -91,6 +93,12 @@ func testConfig(dsn string, opts harnessOptions) config.Config {
 	}
 	if opts.leaseTTL > 0 {
 		cfg.Render.LeaseTTL = opts.leaseTTL
+	}
+	if opts.leaseRenew > 0 {
+		cfg.Worker.LeaseRenewInterval = opts.leaseRenew
+	}
+	if cfg.Worker.LeaseRenewInterval >= cfg.Render.LeaseTTL {
+		cfg.Worker.LeaseRenewInterval = cfg.Render.LeaseTTL / 3
 	}
 	return cfg
 }
@@ -686,6 +694,73 @@ func TestReaperRecoversExpiredLease(t *testing.T) {
 	capacity := h.call(http.MethodGet, "/api/v1/render-farm/capacity", editorToken, nil, nil)
 	if capacity.body["busy"].(float64) != 0 {
 		t.Fatalf("the abandoned seat must be freed: %v", capacity.body)
+	}
+}
+
+// A long encode must keep the seat it already owns: while the renderer works the
+// worker pushes the lease deadline forward, so housekeeping does not mistake
+// running work for an abandoned seat.
+func TestWorkerRefreshesLeaseWhileEncoding(t *testing.T) {
+	var current *harness
+	renderer := worker.RendererFunc(func(ctx context.Context, job *domain.RenderJob) (worker.Output, error) {
+		// Business time moves past the deadline granted at assignment time.
+		current.clk.Advance(90 * time.Second)
+		giveUp := time.Now().Add(5 * time.Second)
+		for {
+			stored, err := current.app.Store.Renders().GetByID(ctx, job.ID)
+			if err != nil {
+				return worker.Output{}, err
+			}
+			if stored.LeaseExpiresAt != nil && stored.LeaseExpiresAt.After(current.clk.Now()) {
+				break
+			}
+			if time.Now().After(giveUp) {
+				return worker.Output{}, fmt.Errorf("the lease of %s was never refreshed", job.ID)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		return worker.Output{URI: "cutvideo://renders/" + job.ID + ".mov", Bytes: 6 << 20}, nil
+	})
+
+	h := newHarness(t, harnessOptions{
+		leaseTTL:   time.Minute,
+		leaseRenew: 2 * time.Millisecond,
+		renderer:   renderer,
+	})
+	current = h
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+	_, timelineID := h.sealedCut(editorToken, "REEL14")
+
+	submitted := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": timelineID, "preset": "master_2160p",
+	}, nil)
+	if submitted.status != http.StatusAccepted {
+		t.Fatalf("submit render failed: %d %v", submitted.status, submitted.body)
+	}
+	jobID := h.stringField(submitted, "id")
+
+	processed, err := h.app.Workers.ProcessOnce(context.Background())
+	if err != nil {
+		t.Fatalf("worker cycle: %v", err)
+	}
+	if !processed {
+		t.Fatal("the worker did not pick up the queued render")
+	}
+
+	report := h.app.Reaper.RunOnce(context.Background())
+	if report.ObservedFailure != nil {
+		t.Fatalf("housekeeping failed: %v", report.ObservedFailure)
+	}
+	if report.RequeuedJobs != 0 {
+		t.Fatalf("a finished render must not be requeued, got %d", report.RequeuedJobs)
+	}
+	job := h.call(http.MethodGet, "/api/v1/renders/"+jobID, editorToken, nil, nil)
+	if job.body["status"] != string(domain.RenderSucceeded) {
+		t.Fatalf("the long render must finish on its original seat: %v", job.body)
+	}
+	if job.body["attempt"].(float64) != 1 {
+		t.Fatalf("a renewed lease must not burn a second attempt: %v", job.body)
 	}
 }
 

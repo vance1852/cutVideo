@@ -19,6 +19,7 @@ const (
 	DefaultSessionTTL         = 12 * time.Hour
 	DefaultRenderLeaseTTL     = 2 * time.Minute
 	DefaultWorkerPollInterval = 250 * time.Millisecond
+	DefaultWorkerLeaseRenew   = 30 * time.Second
 	DefaultWorkerConcurrency  = 2
 	DefaultMaxRenderAttempts  = 3
 	DefaultRetryBackoff       = 2 * time.Second
@@ -73,10 +74,15 @@ type RenderConfig struct {
 
 // WorkerConfig controls the background render worker pool.
 type WorkerConfig struct {
-	Enabled      bool
+	Enabled bool
+	// Concurrency is the number of encoder goroutines polling the queue.
 	Concurrency  int
 	PollInterval time.Duration
-	ReaperPeriod time.Duration
+	// LeaseRenewInterval is how often a worker refreshes the lease of the job it
+	// is encoding. It must stay below the render lease TTL, otherwise the
+	// housekeeping reaper reclaims seats that are still in use.
+	LeaseRenewInterval time.Duration
+	ReaperPeriod       time.Duration
 }
 
 // MediaConfig controls media ingest policy.
@@ -131,10 +137,11 @@ func LoadFrom(lookup Lookup) (Config, error) {
 			Presets:      splitList(stringVar(lookup, "CUTVIDEO_RENDER_PRESETS", "proxy_540p,web_1080p,master_2160p")),
 		},
 		Worker: WorkerConfig{
-			Enabled:      boolVar(lookup, "CUTVIDEO_WORKER_ENABLED", true),
-			Concurrency:  DefaultWorkerConcurrency,
-			PollInterval: DefaultWorkerPollInterval,
-			ReaperPeriod: 30 * time.Second,
+			Enabled:            boolVar(lookup, "CUTVIDEO_WORKER_ENABLED", true),
+			Concurrency:        DefaultWorkerConcurrency,
+			PollInterval:       DefaultWorkerPollInterval,
+			LeaseRenewInterval: DefaultWorkerLeaseRenew,
+			ReaperPeriod:       30 * time.Second,
 		},
 		Media: MediaConfig{
 			Retention:      DefaultAssetRetention,
@@ -158,6 +165,9 @@ func LoadFrom(lookup Lookup) (Config, error) {
 		return Config{}, err
 	}
 	if cfg.Worker.PollInterval, err = durationVar(lookup, "CUTVIDEO_WORKER_POLL_INTERVAL", DefaultWorkerPollInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.Worker.LeaseRenewInterval, err = durationVar(lookup, "CUTVIDEO_WORKER_LEASE_RENEW_INTERVAL", DefaultWorkerLeaseRenew); err != nil {
 		return Config{}, err
 	}
 	if cfg.HTTP.RequestTimeout, err = durationVar(lookup, "CUTVIDEO_HTTP_REQUEST_TIMEOUT", DefaultRequestTimeout); err != nil {
@@ -213,6 +223,12 @@ func (c Config) Validate() error {
 	}
 	if c.Worker.PollInterval <= 0 {
 		return errors.New("config: worker poll interval must be positive")
+	}
+	if c.Worker.LeaseRenewInterval <= 0 {
+		return errors.New("config: worker lease renew interval must be positive")
+	}
+	if c.Worker.LeaseRenewInterval >= c.Render.LeaseTTL {
+		return errors.New("config: worker lease renew interval must be shorter than the render lease ttl")
 	}
 	if c.Media.Retention <= 0 {
 		return errors.New("config: asset retention must be positive")

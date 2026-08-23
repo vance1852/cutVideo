@@ -156,6 +156,31 @@ func (p *Pool) loop(ctx context.Context, index int) {
 	}
 }
 
+// holdLease refreshes the lease of the job being encoded until the caller closes
+// done. It returns as soon as the encode finishes, the process is shutting down
+// or the job no longer holds a lease it may extend.
+func (p *Pool) holdLease(ctx context.Context, jobID string, done <-chan struct{}) {
+	interval := p.cfg.LeaseRenewInterval
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := p.service.RenewLease(ctx, jobID); err != nil {
+				p.logger.Warn("render lease renewal stopped", "job_id", jobID, "error", err.Error())
+				return
+			}
+		}
+	}
+}
+
 // ProcessOnce claims at most one job and drives it to a terminal state. It
 // reports whether a job was processed. Tests call it directly so the queue can be
 // exercised without timers.
@@ -173,7 +198,18 @@ func (p *Pool) ProcessOnce(ctx context.Context) (bool, error) {
 	if _, err := p.service.Start(ctx, job.ID); err != nil {
 		return false, err
 	}
+	// Hold the lease while the encoder works so the housekeeping reaper does not
+	// reclaim a seat that is still in use.
+	heartbeatDone := make(chan struct{})
+	var heartbeat sync.WaitGroup
+	heartbeat.Add(1)
+	go func() {
+		defer heartbeat.Done()
+		p.holdLease(ctx, job.ID, heartbeatDone)
+	}()
 	output, renderErr := p.renderer.Render(ctx, job)
+	close(heartbeatDone)
+	heartbeat.Wait()
 	if renderErr != nil {
 		if errors.Is(renderErr, context.Canceled) || errors.Is(renderErr, context.DeadlineExceeded) {
 			// The process is shutting down. Release the seat and return the job to

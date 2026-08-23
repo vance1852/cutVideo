@@ -31,6 +31,8 @@ Two public paths depend on each other:
   workers can never share one seat.
 - Render jobs consume one attempt per assignment, back off between attempts and
   become permanently failed once the attempt budget is spent.
+- A worker refreshes the lease of the job it is encoding on a fixed interval, so
+  a long render keeps the seat it already owns.
 - An abandoned lease is recovered by the reaper: the job is requeued without
   burning an extra attempt and the seat is released.
 - Cancellation is allowed for the requester and for supervisors, never after the

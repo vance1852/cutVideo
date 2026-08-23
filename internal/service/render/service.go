@@ -1,4 +1,4 @@
-// Package render owns the render farm: queue submission, exclusive slot
+﻿// Package render owns the render farm: queue submission, exclusive slot
 // reservation, lease bookkeeping, attempt retries and cancellation.
 package render
 
@@ -15,8 +15,8 @@ import (
 	"github.com/vance1852/cutVideo/internal/clock"
 	"github.com/vance1852/cutVideo/internal/config"
 	"github.com/vance1852/cutVideo/internal/domain"
-	"github.com/vance1852/cutVideo/internal/ids"
 	"github.com/vance1852/cutVideo/internal/idempotency"
+	"github.com/vance1852/cutVideo/internal/ids"
 	"github.com/vance1852/cutVideo/internal/logging"
 	"github.com/vance1852/cutVideo/internal/repository"
 )
@@ -190,6 +190,33 @@ func (s *Service) Start(ctx context.Context, jobID string) (*domain.RenderJob, e
 		return nil, translate(err, "could not start the render")
 	}
 	return started, nil
+}
+
+// RenewLease pushes the lease deadline of a job that is still being encoded
+// forward. Workers call it periodically so a long render is not mistaken for an
+// abandoned seat by the housekeeping reaper.
+func (s *Service) RenewLease(ctx context.Context, jobID string) (*domain.RenderJob, error) {
+	now := s.clk.Now()
+	var renewed *domain.RenderJob
+	err := s.store.InTx(ctx, func(txCtx context.Context) error {
+		job, err := s.store.Renders().GetByID(txCtx, jobID)
+		if err != nil {
+			return err
+		}
+		expected := job.RowVersion
+		if err := job.ExtendLease(s.cfg.Render.LeaseTTL, now); err != nil {
+			return err
+		}
+		if err := s.store.Renders().Update(txCtx, job, expected); err != nil {
+			return err
+		}
+		renewed = job
+		return nil
+	})
+	if err != nil {
+		return nil, translate(err, "could not renew the render lease")
+	}
+	return renewed, nil
 }
 
 // CompleteInput carries the render output description.
