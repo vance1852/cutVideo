@@ -19,10 +19,6 @@ import (
 	"github.com/vance1852/cutVideo/internal/repository"
 )
 
-// sealRetentionGrace is how long footage referenced by a freshly sealed cut is
-// held so the render window is not cut short by an expiring retention deadline.
-const sealRetentionGrace = 72 * time.Hour
-
 // Service implements the editorial use cases.
 type Service struct {
 	store    repository.Store
@@ -366,13 +362,11 @@ func (s *Service) Seal(ctx context.Context, actor domain.Principal, timelineID s
 		}
 		index := make(map[string]*domain.MediaAsset, len(assets))
 		for _, asset := range assets {
-			held := asset.Clone()
-			// Sealing pins the cut, so footage that is aging out is held for the
-			// render window instead of blocking the seal.
-			if held.Status == domain.AssetVerified && !now.Before(held.RetentionUntil) {
-				held.RetentionUntil = now.Add(sealRetentionGrace)
-			}
-			index[held.ID] = held
+			// The clone carries the real retention deadline unchanged: the
+			// domain seal checks every referenced asset's retention window,
+			// so footage that has aged past retention must block the seal
+			// instead of being silently held for the render window.
+			index[asset.ID] = asset.Clone()
 		}
 		expected := version.RowVersion
 		if err := version.Seal(index, now); err != nil {

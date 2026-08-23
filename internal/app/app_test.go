@@ -1111,3 +1111,86 @@ func TestQuarantinedFootageBlocksSealing(t *testing.T) {
 		t.Fatalf("a failed seal must not advance the project pointer: %v", projectAfter.body)
 	}
 }
+
+// TestExpiredRetentionBlocksSealing guards the regression where a timeline
+// referencing footage whose retention window had elapsed was sealed anyway.
+// Storage may already have that footage on its cleanup list, so a sealed cut
+// would render a master with missing sources. Sealing must be rejected at the
+// retention boundary and report why, while footage still inside its window
+// continues to seal and render as before.
+func TestExpiredRetentionBlocksSealing(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+
+	project := h.call(http.MethodPost, "/api/v1/projects", editorToken, map[string]any{
+		"code":        "RET01",
+		"title":       "Retention",
+		"frame_rate":  25,
+		"resolution":  "1920x1080",
+		"deadline_at": h.clk.Now().Add(96 * time.Hour).Format(time.RFC3339),
+	}, nil)
+	projectID := h.stringField(project, "id")
+	checksum := strings.Repeat("e", 64)
+	asset := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/assets", editorToken, map[string]any{
+		"filename":          "r001_c001.mov",
+		"format":            "mov",
+		"kind":              "video",
+		"declared_checksum": checksum,
+		"bytes":             1 << 24,
+		"duration_ms":       60_000,
+	}, nil)
+	assetID := h.stringField(asset, "id")
+	if verified := h.call(http.MethodPost, "/api/v1/assets/"+assetID+"/verify", editorToken, map[string]any{
+		"observed_checksum": checksum,
+	}, nil); verified.status != http.StatusOK {
+		t.Fatalf("verify failed: %d %v", verified.status, verified.body)
+	}
+
+	// A cut assembled while the footage is still inside its retention window.
+	draft := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/timelines", editorToken, map[string]any{
+		"notes": "rough cut",
+	}, nil)
+	timelineID := h.stringField(draft, "id")
+	if added := h.call(http.MethodPost, "/api/v1/timelines/"+timelineID+"/clips", editorToken, map[string]any{
+		"asset_id":      assetID,
+		"order_index":   0,
+		"source_in_ms":  0,
+		"source_out_ms": 10_000,
+		"track":         "program",
+		"speed_percent": 100,
+	}, nil); added.status != http.StatusCreated {
+		t.Fatalf("add clip failed: %d %v", added.status, added.body)
+	}
+
+	// The rough cut sits while the job drifts; by the time it is sealed the
+	// footage retention window (240h from ingest) has elapsed, so storage may
+	// already have the source on its cleanup list.
+	h.clk.Advance(241 * time.Hour)
+	// The session TTL (2h) elapsed too, so re-authenticate before sealing.
+	editorToken = h.signIn(editorEmail, editorPassword)
+
+	sealed := h.call(http.MethodPost, "/api/v1/timelines/"+timelineID+"/seal", editorToken, nil, nil)
+	if sealed.status != http.StatusPreconditionFailed {
+		t.Fatalf("sealing footage past retention must be rejected, got %d %v", sealed.status, sealed.body)
+	}
+	if sealed.body["error"] == nil {
+		t.Fatalf("seal failure must carry an error envelope: %v", sealed.body)
+	}
+	errBody, _ := sealed.body["error"].(map[string]any)
+	if errBody["code"] != "precondition_failed" {
+		t.Fatalf("expected precondition_failed error code, got %v", errBody["code"])
+	}
+	if msg, _ := errBody["message"].(string); !strings.Contains(msg, "retention") {
+		t.Fatalf("error message must explain the retention failure, got %q", msg)
+	}
+
+	timeline := h.call(http.MethodGet, "/api/v1/timelines/"+timelineID, editorToken, nil, nil)
+	if timeline.body["status"] != string(domain.TimelineDraft) {
+		t.Fatalf("the failed seal must leave the draft untouched: %v", timeline.body)
+	}
+	projectAfter := h.call(http.MethodGet, "/api/v1/projects/"+projectID, editorToken, nil, nil)
+	if projectAfter.body["sealed_version"].(float64) != 0 {
+		t.Fatalf("a failed seal must not advance the project pointer: %v", projectAfter.body)
+	}
+}
