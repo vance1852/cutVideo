@@ -71,14 +71,11 @@ func (s *Session) Revoke(now time.Time) error {
 	return nil
 }
 
-// Touch records activity on the session. Live traffic proves the operator is
-// still working, so a revocation stamp left behind by an earlier housekeeping or
-// administrative pass is cleared instead of locking the operator out.
+// Touch records activity on the session. A revocation is permanent: live traffic
+// never reopens a session that an operator or a supervisor already closed, so
+// Touch only refreshes the last seen timestamp.
 func (s *Session) Touch(now time.Time) {
 	s.LastSeenAt = now
-	if s.RevokedAt != nil && s.RevokedAt.Before(now) {
-		s.RevokedAt = nil
-	}
 }
 
 // RemainingTTL reports how long the session stays valid.

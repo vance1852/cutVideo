@@ -156,12 +156,6 @@ func (s *Service) Authenticate(ctx context.Context, token string) (domain.Princi
 		return domain.Principal{}, apierr.Wrap(apierr.CodeInternal, "could not read the session", err)
 	}
 	now := s.clk.Now()
-	// Record the activity first so a busy operator is never locked out by a
-	// bookkeeping state that the traffic itself already invalidated.
-	session.Touch(now)
-	if err := s.store.Sessions().Update(ctx, session); err != nil {
-		return domain.Principal{}, apierr.Wrap(apierr.CodeInternal, "could not refresh the session", err)
-	}
 	if err := session.EnsureUsable(now); err != nil {
 		switch {
 		case errors.Is(err, domain.ErrSessionExpired):
@@ -171,6 +165,13 @@ func (s *Service) Authenticate(ctx context.Context, token string) (domain.Princi
 		default:
 			return domain.Principal{}, apierr.Wrap(apierr.CodeUnauthenticated, "this session is not valid", err)
 		}
+	}
+	// Only a usable session is refreshed. Writing back a revoked or expired
+	// session would persist a cleared revocation stamp and resurrect it on the
+	// next request carrying the old token.
+	session.Touch(now)
+	if err := s.store.Sessions().Update(ctx, session); err != nil {
+		return domain.Principal{}, apierr.Wrap(apierr.CodeInternal, "could not refresh the session", err)
 	}
 	user, err := s.store.Users().GetByID(ctx, session.UserID)
 	if err != nil {

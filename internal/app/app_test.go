@@ -497,6 +497,72 @@ func TestAuthenticationAndAuthorizationBoundaries(t *testing.T) {
 	}
 }
 
+// TestRevokedSessionsStayRevoked reproduces the reported incident: after a
+// session is revoked the old bearer token must keep failing even once time has
+// moved past the revocation instant. The prior Touch implementation cleared
+// revoked_at whenever it predated now, and Authenticate wrote that cleared state
+// back to the store, so the next request with the old token resurrected the
+// session and erased the revocation stamp.
+func TestRevokedSessionsStayRevoked(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+
+	// Reach an authenticated endpoint so the session row is established.
+	before := h.call(http.MethodGet, "/api/v1/projects", editorToken, nil, nil)
+	if before.status != http.StatusOK {
+		t.Fatalf("editor must be authenticated before revocation: %d %v", before.status, before.body)
+	}
+
+	// Administrative revocation of every session belonging to the editor.
+	editor := h.call(http.MethodGet, "/api/v1/users", supervisorToken, nil, nil)
+	var editorID string
+	for _, raw := range editor.body["items"].([]any) {
+		item := raw.(map[string]any)
+		if item["email"] == editorEmail {
+			editorID = item["id"].(string)
+		}
+	}
+	if editorID == "" {
+		t.Fatalf("could not resolve editor id: %v", editor.body)
+	}
+	revoke := h.call(http.MethodDelete, fmt.Sprintf("/api/v1/users/%s/sessions", editorID), supervisorToken, nil, nil)
+	if revoke.status != http.StatusOK || int(revoke.body["revoked"].(float64)) < 1 {
+		t.Fatalf("administrative revoke failed: %d %v", revoke.status, revoke.body)
+	}
+
+	// Advance the clock past the revocation instant: this is what used to clear
+	// the revoked_at stamp inside Authenticate.
+	h.clk.Advance(time.Minute)
+
+	afterAdmin := h.call(http.MethodGet, "/api/v1/projects", editorToken, nil, nil)
+	if afterAdmin.status != http.StatusUnauthorized {
+		t.Fatalf("old token must stay revoked after admin revoke and time passing: %d %v", afterAdmin.status, afterAdmin.body)
+	}
+
+	// A fresh sign in must still work, proving only the old session died.
+	fresh := h.signIn(editorEmail, editorPassword)
+	if fresh == "" {
+		t.Fatalf("fresh sign in failed")
+	}
+	ok := h.call(http.MethodGet, "/api/v1/projects", fresh, nil, nil)
+	if ok.status != http.StatusOK {
+		t.Fatalf("freshly signed in session must work: %d %v", ok.status, ok.body)
+	}
+
+	// Self sign out: revocation must also survive the clock advancing and a
+	// later request with the same token.
+	signedOut := h.call(http.MethodDelete, "/api/v1/sessions/current", fresh, nil, nil)
+	if signedOut.status != http.StatusNoContent {
+		t.Fatalf("self sign out failed: %d %v", signedOut.status, signedOut.body)
+	}
+	h.clk.Advance(time.Minute)
+	afterSelf := h.call(http.MethodGet, "/api/v1/projects", fresh, nil, nil)
+	if afterSelf.status != http.StatusUnauthorized {
+		t.Fatalf("old token must stay revoked after self sign out and time passing: %d %v", afterSelf.status, afterSelf.body)
+	}
+}
+
 func TestEditorCannotReachAnotherEditorsProject(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)

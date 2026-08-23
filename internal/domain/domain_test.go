@@ -79,6 +79,26 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+// A revocation must survive a later activity touch. The previous Touch cleared a
+// revocation stamp whenever it predated now, which let the next request with the
+// old token resurrect the session and persist the cleared stamp.
+func TestSessionTouchDoesNotResurrectRevocation(t *testing.T) {
+	session, err := domain.NewSession("ses_2", "usr_1", "hash", "agent", reference(), time.Hour)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if err := session.Revoke(reference()); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	session.Touch(reference().Add(time.Minute))
+	if !session.Revoked() {
+		t.Fatal("touch must not clear a revocation stamp")
+	}
+	if err := session.EnsureUsable(reference().Add(time.Minute)); !errors.Is(err, domain.ErrSessionRevoked) {
+		t.Fatalf("revoked session must stay revoked after touch, got %v", err)
+	}
+}
+
 func TestAssetVerificationRejectsChecksumMismatch(t *testing.T) {
 	asset, err := domain.NewMediaAsset("ast_1", "prj_1", "a001.mov", "mov", domain.AssetKindVideo,
 		strings.Repeat("b", 64), 4096, 10_000, reference(), time.Hour)
