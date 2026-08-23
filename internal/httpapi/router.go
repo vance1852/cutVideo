@@ -129,10 +129,11 @@ func (rt *Router) Handler() http.Handler {
 	supervisor.HandleFunc("POST /api/v1/users", rt.handleProvisionUser)
 	supervisor.HandleFunc("DELETE /api/v1/users/{userID}/sessions", rt.handleRevokeSessions)
 	supervisor.HandleFunc("POST /api/v1/render-farm/slots", rt.handleProvisionSlot)
-	// Maintaining where a cut is delivered belongs to the editorial surface; the
-	// delivery service settles who may change a destination.
-	authenticated.HandleFunc("POST /api/v1/projects/{projectID}/delivery-targets", rt.handleCreateTarget)
-	authenticated.HandleFunc("PATCH /api/v1/delivery-targets/{targetID}", rt.handleSetTargetState)
+	// Maintaining where a cut is delivered — adding, enabling or disabling a
+	// destination — is a supervisor responsibility. Editors may only read the
+	// destination list and dispatch their own finished renders.
+	supervisor.HandleFunc("POST /api/v1/projects/{projectID}/delivery-targets", rt.handleCreateTarget)
+	supervisor.HandleFunc("PATCH /api/v1/delivery-targets/{targetID}", rt.handleSetTargetState)
 
 	authenticatedHandler := middleware.Chain(authenticated, middleware.Authenticate(rt.auth, rt.logger))
 	supervisorHandler := middleware.Chain(supervisor,
@@ -189,8 +190,6 @@ var authenticatedPatterns = []string{
 	"GET /api/v1/renders/{jobID}/deliveries",
 	"POST /api/v1/renders/{jobID}/deliveries/dispatch",
 	"GET /api/v1/projects/{projectID}/delivery-targets",
-	"POST /api/v1/projects/{projectID}/delivery-targets",
-	"PATCH /api/v1/delivery-targets/{targetID}",
 }
 
 // supervisorPatterns routes that additionally require the supervisor role.
@@ -198,4 +197,6 @@ var supervisorPatterns = []string{
 	"POST /api/v1/users",
 	"DELETE /api/v1/users/{userID}/sessions",
 	"POST /api/v1/render-farm/slots",
+	"POST /api/v1/projects/{projectID}/delivery-targets",
+	"PATCH /api/v1/delivery-targets/{targetID}",
 }

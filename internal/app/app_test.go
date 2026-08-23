@@ -910,6 +910,51 @@ func TestDeliveryDispatchReportsPartialFailureAndSkipsDisabledTargets(t *testing
 	}
 }
 
+func TestDeliveryTargetManagementIsSupervisorOnly(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+	projectID, _ := h.sealedCut(editorToken, "REEL20")
+
+	created := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/delivery-targets", supervisorToken, map[string]any{
+		"name":           "broadcast",
+		"kind":           "webhook",
+		"endpoint":       "https://broadcast.invalid/ingest",
+		"credential_ref": "vault://broadcast",
+	}, nil)
+	if created.status != http.StatusCreated {
+		t.Fatalf("supervisor must create a destination: %d %v", created.status, created.body)
+	}
+	targetID := h.stringField(created, "id")
+
+	editorCreate := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/delivery-targets", editorToken, map[string]any{
+		"name":           "rogue",
+		"kind":           "webhook",
+		"endpoint":       "https://rogue.invalid/ingest",
+		"credential_ref": "vault://rogue",
+	}, nil)
+	if editorCreate.status != http.StatusForbidden {
+		t.Fatalf("an editor must not create a destination, got %d %v", editorCreate.status, editorCreate.body)
+	}
+
+	editorDisable := h.call(http.MethodPatch, "/api/v1/delivery-targets/"+targetID, editorToken,
+		map[string]any{"enabled": false}, nil)
+	if editorDisable.status != http.StatusForbidden {
+		t.Fatalf("an editor must not disable a destination, got %d %v", editorDisable.status, editorDisable.body)
+	}
+
+	supervisorDisable := h.call(http.MethodPatch, "/api/v1/delivery-targets/"+targetID, supervisorToken,
+		map[string]any{"enabled": false}, nil)
+	if supervisorDisable.status != http.StatusOK {
+		t.Fatalf("supervisor must disable a destination: %d %v", supervisorDisable.status, supervisorDisable.body)
+	}
+
+	listed := h.call(http.MethodGet, "/api/v1/projects/"+projectID+"/delivery-targets", editorToken, nil, nil)
+	if listed.status != http.StatusOK {
+		t.Fatalf("an editor must still read the destination list: %d %v", listed.status, listed.body)
+	}
+}
+
 func TestHTTPTransportPropagatesDownstreamRejection(t *testing.T) {
 	var received int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

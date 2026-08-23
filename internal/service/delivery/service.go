@@ -54,12 +54,11 @@ func (s *Service) CreateTarget(ctx context.Context, actor domain.Principal, inpu
 		return nil, apierr.Wrap(apierr.CodeInvalidRequest, "the destination details are not acceptable", err)
 	}
 	err = s.store.InTx(ctx, func(txCtx context.Context) error {
-		project, err := s.store.Projects().GetByID(txCtx, input.ProjectID)
-		if err != nil {
+		if _, err := s.store.Projects().GetByID(txCtx, input.ProjectID); err != nil {
 			return err
 		}
-		if err := project.EnsureWriteAccess(actor); err != nil {
-			return apierr.Wrap(apierr.CodeForbidden, "you may not manage destinations on this project", err)
+		if err := actor.RequireDeliveryManagement(); err != nil {
+			return apierr.Wrap(apierr.CodeForbidden, "only supervisors may manage destinations", err)
 		}
 		if err := s.store.Deliveries().CreateTarget(txCtx, target); err != nil {
 			return err
@@ -86,7 +85,7 @@ func (s *Service) SetTargetEnabled(ctx context.Context, actor domain.Principal, 
 			return err
 		}
 		if err := target.EnsureManageable(actor); err != nil {
-			return apierr.Wrap(apierr.CodeForbidden, "you may not change this destination", err)
+			return apierr.Wrap(apierr.CodeForbidden, "only supervisors may change a destination", err)
 		}
 		if enabled {
 			if err := target.Enable(now); err != nil {

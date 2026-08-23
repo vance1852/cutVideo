@@ -104,13 +104,13 @@ func (t *DeliveryTarget) Enable(now time.Time) error {
 }
 
 // EnsureManageable reports whether the principal may change this destination.
-// Distribution is part of finishing a cut, so anyone who may edit the work may
-// also maintain where it goes.
+// Adding, enabling or disabling destinations is a supervisor responsibility;
+// editors may only read the list and dispatch their own finished renders.
 func (t *DeliveryTarget) EnsureManageable(principal Principal) error {
 	if principal.IsZero() {
 		return ErrPermissionDenied
 	}
-	return principal.RequireEdit()
+	return principal.RequireDeliveryManagement()
 }
 
 // Clone returns an independent copy of the target.
