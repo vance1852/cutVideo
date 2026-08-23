@@ -51,9 +51,20 @@ type SubmitInput struct {
 	IdempotencyKey string
 }
 
+// errSubmitAborted is returned by Submit when the caller gave up while the
+// queue transaction was still open. It unwraps to context.Canceled so the
+// transaction is rolled back and the public error surfaces a cancellation
+// rather than a half applied render job.
+var errSubmitAborted = fmt.Errorf("render: submit abandoned by the caller: %w", context.Canceled)
+
 // Submit queues a render for a sealed timeline version. Repeating the same
 // request with the same idempotency key returns the original job instead of
 // consuming farm capacity twice.
+//
+// If the caller abandons the request (closes the connection or lets the context
+// expire) while the queue transaction is in flight, the work is rolled back so
+// no render job is left behind. The timeline stays free for a subsequent
+// submission instead of being blocked by an orphaned queued task.
 func (s *Service) Submit(ctx context.Context, actor domain.Principal, input SubmitInput) (*domain.RenderJob, error) {
 	if err := actor.RequireEdit(); err != nil {
 		return nil, apierr.Wrap(apierr.CodeForbidden, "your role may not submit renders", err)
@@ -113,9 +124,22 @@ func (s *Service) Submit(ctx context.Context, actor domain.Principal, input Subm
 			return err
 		}
 		job = candidate
+		// The caller may have hung up while the queue transaction was open. The
+		// store keeps the transaction alive on a detached context on purpose, so
+		// without this guard the render job would commit after the caller left
+		// and block the timeline until a manual cancel. Treat a canceled caller as
+		// a failure and let InTx roll the work back.
+		if err := ctx.Err(); err != nil {
+			return errSubmitAborted
+		}
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			logging.FromContext(ctx, s.logger).Info("render submit abandoned by the caller",
+				"timeline_id", input.TimelineID, "actor_id", actor.UserID)
+			return nil, apierr.Wrap(apierr.CodeCanceled, "the render submission was canceled before it was queued", err)
+		}
 		return nil, translate(err, "could not queue the render")
 	}
 	logging.FromContext(ctx, s.logger).Info("render queued", "job_id", job.ID, "preset", job.Preset)

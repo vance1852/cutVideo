@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vance1852/cutVideo/internal/apierr"
 	"github.com/vance1852/cutVideo/internal/app"
 	"github.com/vance1852/cutVideo/internal/clock"
 	"github.com/vance1852/cutVideo/internal/config"
@@ -21,6 +22,7 @@ import (
 	"github.com/vance1852/cutVideo/internal/ids"
 	"github.com/vance1852/cutVideo/internal/logging"
 	"github.com/vance1852/cutVideo/internal/service/delivery"
+	"github.com/vance1852/cutVideo/internal/service/render"
 	"github.com/vance1852/cutVideo/internal/worker"
 )
 
@@ -459,6 +461,65 @@ func TestSecondActiveRenderForSameTimelineConflicts(t *testing.T) {
 	}, nil)
 	if second.status != http.StatusConflict {
 		t.Fatalf("expected 409 for duplicate queue work, got %d %v", second.status, second.body)
+	}
+}
+
+// A submit request the editor abandoned (she closed the browser tab while the
+// page was still waiting) must not leave a render job behind. The timeline has
+// to stay free so the same sealed version can be queued again afterwards.
+func TestAbandonedRenderSubmitLeavesNoQueueWorkBehind(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+	_, timelineID := h.sealedCut(editorToken, "REELAB")
+
+	editor, err := h.app.Auth.Authenticate(context.Background(), editorToken)
+	if err != nil {
+		t.Fatalf("authenticate editor: %v", err)
+	}
+
+	// The editor gives up mid submit. The store keeps the transaction alive on a
+	// detached context on purpose, so cancelling here mirrors a tab close while
+	// the queue insert is still in flight.
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	abandoned, submitErr := h.app.Render.Submit(canceledCtx, editor, render.SubmitInput{
+		TimelineID: timelineID,
+		Preset:     "web_1080p",
+		Priority:   domain.PriorityNormal,
+	})
+	if submitErr == nil {
+		t.Fatalf("an abandoned submit must surface an error, got %+v", abandoned)
+	}
+	if abandoned != nil {
+		t.Fatalf("an abandoned submit must not return a render job, got %+v", abandoned)
+	}
+	if !apierr.IsCode(submitErr, apierr.CodeCanceled) {
+		t.Fatalf("expected a canceled error code, got %v", submitErr)
+	}
+
+	// No render job may linger in the queue, and no seat may be held.
+	capacity := h.call(http.MethodGet, "/api/v1/render-farm/capacity", editorToken, nil, nil)
+	if capacity.body["queued_jobs"].(float64) != 0 {
+		t.Fatalf("an abandoned submit must not leave queued work: %v", capacity.body)
+	}
+	if capacity.body["busy"].(float64) != 0 {
+		t.Fatalf("an abandoned submit must not occupy a seat: %v", capacity.body)
+	}
+
+	// The same sealed version must queue normally on the next attempt.
+	resubmitted := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": timelineID, "preset": "web_1080p",
+	}, nil)
+	if resubmitted.status != http.StatusAccepted {
+		t.Fatalf("the timeline must accept a fresh submit after an abandoned one, got %d %v",
+			resubmitted.status, resubmitted.body)
+	}
+	jobID := h.stringField(resubmitted, "id")
+	job := h.call(http.MethodGet, "/api/v1/renders/"+jobID, editorToken, nil, nil)
+	if job.body["status"] != string(domain.RenderQueued) {
+		t.Fatalf("the resubmitted render must be queued: %v", job.body)
 	}
 }
 
