@@ -442,9 +442,12 @@ func (s *Service) Get(ctx context.Context, actor domain.Principal, jobID string)
 	if actor.IsZero() {
 		return nil, apierr.New(apierr.CodeUnauthenticated, "a session token is required")
 	}
-	// The farm queue is shared, so any signed in operator may look up a render to
-	// see what the encoders are working on.
-	_ = project
+	// A render carries the master location and feeds the delivery trail, so it is
+	// bound to the project's readers: the owning editor and non editors
+	// (supervisors, auditors). Another editor may not read it.
+	if !project.OwnedBy(actor) && actor.Role == domain.RoleEditor {
+		return nil, apierr.Wrap(apierr.CodeForbidden, "you may not read this render job", domain.ErrPermissionDenied)
+	}
 	return job, nil
 }
 

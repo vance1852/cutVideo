@@ -525,6 +525,73 @@ func TestEditorCannotReachAnotherEditorsProject(t *testing.T) {
 	}
 }
 
+// TestEditorCannotReadAnotherEditorsRenderDetailAndDeliveries guards the
+// contractual secrecy of a finished master's storage location and downstream
+// push trail. Another editor who learns the render job id must still be denied
+// the render detail (which carries output_uri) and the delivery records, while
+// the owning editor and a supervisor can read them.
+func TestEditorCannotReadAnotherEditorsRenderDetailAndDeliveries(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	ownerToken := h.provisionEditor(supervisorToken)
+	_, timelineID := h.sealedCut(ownerToken, "REEL04")
+
+	submitted := h.call(http.MethodPost, "/api/v1/renders", ownerToken, map[string]any{
+		"timeline_id": timelineID, "preset": "web_1080p",
+	}, nil)
+	if submitted.status != http.StatusAccepted {
+		t.Fatalf("submit render failed: %d %v", submitted.status, submitted.body)
+	}
+	jobID := h.stringField(submitted, "id")
+	if _, err := h.app.Workers.ProcessOnce(context.Background()); err != nil {
+		t.Fatalf("worker cycle: %v", err)
+	}
+
+	intruderToken := h.provisionSecondEditor(supervisorToken)
+
+	rogueRender := h.call(http.MethodGet, "/api/v1/renders/"+jobID, intruderToken, nil, nil)
+	if rogueRender.status != http.StatusForbidden {
+		t.Fatalf("another editor must not read the render detail, got %d %v", rogueRender.status, rogueRender.body)
+	}
+	if _, ok := rogueRender.body["output_uri"]; ok {
+		t.Fatalf("another editor must not see the master location: %v", rogueRender.body)
+	}
+
+	rogueDeliveries := h.call(http.MethodGet, "/api/v1/renders/"+jobID+"/deliveries", intruderToken, nil, nil)
+	if rogueDeliveries.status != http.StatusForbidden {
+		t.Fatalf("another editor must not read the delivery records, got %d %v", rogueDeliveries.status, rogueDeliveries.body)
+	}
+
+	ownerRender := h.call(http.MethodGet, "/api/v1/renders/"+jobID, ownerToken, nil, nil)
+	if ownerRender.status != http.StatusOK {
+		t.Fatalf("the owning editor must read their own render, got %d %v", ownerRender.status, ownerRender.body)
+	}
+	supervisorRender := h.call(http.MethodGet, "/api/v1/renders/"+jobID, supervisorToken, nil, nil)
+	if supervisorRender.status != http.StatusOK {
+		t.Fatalf("a supervisor must read the render, got %d %v", supervisorRender.status, supervisorRender.body)
+	}
+	supervisorDeliveries := h.call(http.MethodGet, "/api/v1/renders/"+jobID+"/deliveries", supervisorToken, nil, nil)
+	if supervisorDeliveries.status != http.StatusOK {
+		t.Fatalf("a supervisor must read the delivery records, got %d %v", supervisorDeliveries.status, supervisorDeliveries.body)
+	}
+}
+
+// provisionSecondEditor creates a second editor account distinct from the
+// default editorEmail and returns a signed in session token for it.
+func (h *harness) provisionSecondEditor(supervisorToken string) string {
+	h.t.Helper()
+	created := h.call(http.MethodPost, "/api/v1/users", supervisorToken, map[string]string{
+		"email":        "other-editor@cutvideo.test",
+		"display_name": "Neighboring Cut Editor",
+		"role":         string(domain.RoleEditor),
+		"password":     "other-editor-secret-7",
+	}, nil)
+	if created.status != http.StatusCreated {
+		h.t.Fatalf("provision second editor failed: %d %v", created.status, created.body)
+	}
+	return h.signIn("other-editor@cutvideo.test", "other-editor-secret-7")
+}
+
 func TestBatchVerificationReportsPartialFailure(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)

@@ -304,9 +304,12 @@ func (s *Service) ListRecords(ctx context.Context, actor domain.Principal, jobID
 	if actor.IsZero() {
 		return nil, apierr.New(apierr.CodeUnauthenticated, "a session token is required")
 	}
-	// Distribution progress is farm wide information, so it is readable by any
-	// signed in operator.
-	_ = project
+	// The delivery trail names every downstream destination a master was pushed to,
+	// so it is bound to the project's readers: the owning editor and non editors
+	// (supervisors, auditors). Another editor may not read it.
+	if !project.OwnedBy(actor) && actor.Role == domain.RoleEditor {
+		return nil, apierr.Wrap(apierr.CodeForbidden, "you may not read these delivery records", domain.ErrPermissionDenied)
+	}
 	records, err := s.store.Deliveries().ListRecordsForJob(ctx, jobID)
 	if err != nil {
 		return nil, apierr.Wrap(apierr.CodeInternal, "could not list delivery records", err)
