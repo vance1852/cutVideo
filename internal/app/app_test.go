@@ -462,6 +462,56 @@ func TestSecondActiveRenderForSameTimelineConflicts(t *testing.T) {
 	}
 }
 
+// TestRenderIdempotencyKeyIsScopedPerProject reproduces the shared-submission
+// script collision: two distinct projects submit with the same fixed key. Each
+// project must queue its own job; the second submit must not hand back the first
+// project's job, and a replay of the same key in the same project returns the
+// original job.
+func TestRenderIdempotencyKeyIsScopedPerProject(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+
+	_, timelineA := h.sealedCut(editorToken, "SHARDA")
+	_, timelineB := h.sealedCut(editorToken, "SHAREDB")
+
+	const sharedKey = "nightly-master"
+
+	first := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": timelineA, "preset": "web_1080p",
+	}, map[string]string{"Idempotency-Key": sharedKey})
+	if first.status != http.StatusAccepted {
+		t.Fatalf("project A submit failed: %d %v", first.status, first.body)
+	}
+	jobA := h.stringField(first, "id")
+	if h.stringField(first, "project_id") == "" {
+		t.Fatalf("project A job missing project_id: %v", first.body)
+	}
+
+	second := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": timelineB, "preset": "web_1080p",
+	}, map[string]string{"Idempotency-Key": sharedKey})
+	if second.status != http.StatusAccepted {
+		t.Fatalf("project B submit failed: %d %v", second.status, second.body)
+	}
+	jobB := h.stringField(second, "id")
+	if jobB == jobA {
+		t.Fatalf("project B was handed project A's job %q instead of its own", jobA)
+	}
+
+	// Repeating the same key within project B replays its own job rather than
+	// creating a third one or surfacing project A's job.
+	replay := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": timelineB, "preset": "web_1080p",
+	}, map[string]string{"Idempotency-Key": sharedKey})
+	if replay.status != http.StatusAccepted {
+		t.Fatalf("project B replay failed: %d %v", replay.status, replay.body)
+	}
+	if h.stringField(replay, "id") != jobB {
+		t.Fatalf("replay did not return project B's job: %v", replay.body)
+	}
+}
+
 func TestAuthenticationAndAuthorizationBoundaries(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)

@@ -69,10 +69,16 @@ func (s *Service) Submit(ctx context.Context, actor domain.Principal, input Subm
 	now := s.clk.Now()
 	var job *domain.RenderJob
 	err := s.store.InTx(ctx, func(txCtx context.Context) error {
+		version, err := s.store.Timelines().GetVersion(txCtx, input.TimelineID)
+		if err != nil {
+			return err
+		}
 		// A replay is answered from the stored submission before any further work,
-		// so a retried request never touches the timeline or the farm again.
+		// so a retried request never creates a second job or touches the farm
+		// again. The key is scoped to the project so the same key reused across
+		// different projects each queues its own work instead of colliding.
 		if key := strings.TrimSpace(input.IdempotencyKey); key != "" {
-			existing, err := s.store.Renders().FindByIdempotencyKey(txCtx, "", key)
+			existing, err := s.store.Renders().FindByIdempotencyKey(txCtx, version.ProjectID, key)
 			if err != nil && !errors.Is(err, domain.ErrNotFound) {
 				return err
 			}
@@ -80,10 +86,6 @@ func (s *Service) Submit(ctx context.Context, actor domain.Principal, input Subm
 				job = existing
 				return nil
 			}
-		}
-		version, err := s.store.Timelines().GetVersion(txCtx, input.TimelineID)
-		if err != nil {
-			return err
 		}
 		project, err := s.store.Projects().GetByID(txCtx, version.ProjectID)
 		if err != nil {
