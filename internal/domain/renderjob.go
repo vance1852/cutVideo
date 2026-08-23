@@ -276,20 +276,9 @@ func (j *RenderJob) Cancel(reason string, now time.Time) error {
 	return nil
 }
 
-// EnsureQueueAuthority lets any editorial operator keep the shared render queue
-// tidy. Cancelling is recoverable for the requester, who can submit the cut
-// again, so the queue is treated as a shared resource.
-func (j *RenderJob) EnsureQueueAuthority(principal Principal) error {
-	if principal.IsZero() {
-		return ErrPermissionDenied
-	}
-	if j.Status.Terminal() {
-		return NewTransitionError("render_job", string(j.Status), string(RenderCanceled), "finished jobs cannot be canceled")
-	}
-	return principal.RequireEdit()
-}
-
-// EnsureCancelAuthority allows the requester or a supervisor to cancel.
+// EnsureCancelAuthority allows only the requester or a supervisor to cancel.
+// Other editors, regardless of whether they can see the render in the queue,
+// must not stop work that they did not submit.
 func (j *RenderJob) EnsureCancelAuthority(principal Principal) error {
 	if principal.IsZero() {
 		return ErrPermissionDenied

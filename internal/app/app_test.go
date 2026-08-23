@@ -848,6 +848,64 @@ func TestCancelReleasesSeatAndBlocksLateCancel(t *testing.T) {
 	}
 }
 
+func TestCancelBlockedForUnrelatedEditorKeepsJobIntact(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	ownerToken := h.provisionEditor(supervisorToken)
+	_, timelineID := h.sealedCut(ownerToken, "REEL08B")
+
+	submitted := h.call(http.MethodPost, "/api/v1/renders", ownerToken, map[string]any{
+		"timeline_id": timelineID, "preset": "web_1080p",
+	}, nil)
+	jobID := h.stringField(submitted, "id")
+	if _, err := h.app.Render.Claim(context.Background(), "primary"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := h.app.Render.Start(context.Background(), jobID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	intruder := h.call(http.MethodPost, "/api/v1/users", supervisorToken, map[string]string{
+		"email":        "intruder@cutvideo.test",
+		"display_name": "Other Editor",
+		"role":         string(domain.RoleEditor),
+		"password":     "intruder-secret-9",
+	}, nil)
+	if intruder.status != http.StatusCreated {
+		t.Fatalf("provision second editor failed: %d %v", intruder.status, intruder.body)
+	}
+	intruderToken := h.signIn("intruder@cutvideo.test", "intruder-secret-9")
+
+	blocked := h.call(http.MethodPost, "/api/v1/renders/"+jobID+"/cancel", intruderToken, map[string]any{
+		"reason": "freeing up the farm",
+	}, nil)
+	if blocked.status != http.StatusForbidden {
+		t.Fatalf("an unrelated editor must not cancel another editor's render, got %d %v", blocked.status, blocked.body)
+	}
+
+	still := h.call(http.MethodGet, "/api/v1/renders/"+jobID, ownerToken, nil, nil)
+	if still.body["status"] != string(domain.RenderRendering) {
+		t.Fatalf("the blocked cancel must leave the rendering job untouched, got %v", still.body["status"])
+	}
+	capacity := h.call(http.MethodGet, "/api/v1/render-farm/capacity", ownerToken, nil, nil)
+	if capacity.body["busy"].(float64) != 1 {
+		t.Fatalf("the blocked cancel must not release the seat, got %v", capacity.body)
+	}
+
+	ownerCancel := h.call(http.MethodPost, "/api/v1/renders/"+jobID+"/cancel", ownerToken, map[string]any{
+		"reason": "client pulled the cut",
+	}, nil)
+	if ownerCancel.status != http.StatusOK || ownerCancel.body["status"] != string(domain.RenderCanceled) {
+		t.Fatalf("the requester must still be able to cancel: %d %v", ownerCancel.status, ownerCancel.body)
+	}
+	supervisorCancel := h.call(http.MethodPost, "/api/v1/renders/"+jobID+"/cancel", supervisorToken, map[string]any{
+		"reason": "again",
+	}, nil)
+	if supervisorCancel.status != http.StatusPreconditionFailed {
+		t.Fatalf("a supervisor cancelling a finished job must hit 412, got %d %v", supervisorCancel.status, supervisorCancel.body)
+	}
+}
+
 func TestDeliveryDispatchReportsPartialFailureAndSkipsDisabledTargets(t *testing.T) {
 	transport := &delivery.StubTransport{Failures: map[string]error{
 		"archive": errors.New("aspera endpoint refused the transfer"),

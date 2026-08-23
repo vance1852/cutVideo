@@ -328,7 +328,7 @@ func (s *Service) Cancel(ctx context.Context, actor domain.Principal, jobID, rea
 		if err != nil {
 			return err
 		}
-		if err := job.EnsureQueueAuthority(actor); err != nil {
+		if err := job.EnsureCancelAuthority(actor); err != nil {
 			return err
 		}
 		slotID := job.SlotID
