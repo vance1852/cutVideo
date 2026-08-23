@@ -418,6 +418,102 @@ func TestRenderIdempotencyKeyIsUniquePerProject(t *testing.T) {
 	}
 }
 
+func TestRenderListingTotalsMatchFilter(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	editor := seedUser(t, store, "usr_re", domain.RoleEditor)
+	rival := seedUser(t, store, "usr_rv", domain.RoleEditor)
+	project := seedProject(t, store, "prj_re", "LIST01", editor.ID)
+	version, err := domain.NewTimelineVersion("tml_l", project.ID, 1, editor.ID, "", testTime())
+	if err != nil {
+		t.Fatalf("new version: %v", err)
+	}
+	if err := store.Timelines().CreateVersion(ctx, version); err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+
+	// Two jobs owned by the editor, five by a rival in a different group.
+	for i := 0; i < 2; i++ {
+		job, _ := domain.NewRenderJob(fmt.Sprintf("rnd_e%d", i), project.ID, version.ID, editor.ID,
+			"proxy_540p", domain.PriorityNormal, 3, "", testTime())
+		if err := store.Renders().Create(ctx, job); err != nil {
+			t.Fatalf("create editor job: %v", err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		job, _ := domain.NewRenderJob(fmt.Sprintf("rnd_r%d", i), project.ID, version.ID, rival.ID,
+			"proxy_540p", domain.PriorityNormal, 3, "", testTime())
+		if err := store.Renders().Create(ctx, job); err != nil {
+			t.Fatalf("create rival job: %v", err)
+		}
+	}
+
+	// The editor must only see her own two jobs.
+	page, err := domain.NewPage(1, 5, "queued_at", domain.SortAscending)
+	if err != nil {
+		t.Fatalf("new page: %v", err)
+	}
+	scoped, err := store.Renders().List(ctx, domain.RenderFilter{RequestedBy: editor.ID}, page)
+	if err != nil {
+		t.Fatalf("list renders: %v", err)
+	}
+	if scoped.Total != 2 {
+		t.Fatalf("scoped total must match the editor's jobs, got %d", scoped.Total)
+	}
+	if len(scoped.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(scoped.Items))
+	}
+	if scoped.TotalPages != 1 {
+		t.Fatalf("expected 1 page, got %d", scoped.TotalPages)
+	}
+
+	// Paging one row at a time must report 2 pages and never an empty page.
+	one, err := domain.NewPage(1, 1, "queued_at", domain.SortAscending)
+	if err != nil {
+		t.Fatalf("new page one: %v", err)
+	}
+	first, err := store.Renders().List(ctx, domain.RenderFilter{RequestedBy: editor.ID}, one)
+	if err != nil {
+		t.Fatalf("list renders page one: %v", err)
+	}
+	if first.Total != 2 || first.TotalPages != 2 {
+		t.Fatalf("expected total 2 over 2 pages, got %d total / %d pages", first.Total, first.TotalPages)
+	}
+	if len(first.Items) != 1 {
+		t.Fatalf("expected 1 item on page one, got %d", len(first.Items))
+	}
+	two, err := domain.NewPage(2, 1, "queued_at", domain.SortAscending)
+	if err != nil {
+		t.Fatalf("new page two: %v", err)
+	}
+	second, err := store.Renders().List(ctx, domain.RenderFilter{RequestedBy: editor.ID}, two)
+	if err != nil {
+		t.Fatalf("list renders page two: %v", err)
+	}
+	if len(second.Items) != 1 {
+		t.Fatalf("expected 1 item on page two, got %d", len(second.Items))
+	}
+
+	// A status filter must produce a total that matches its rows.
+	statusFilter, err := store.Renders().List(ctx,
+		domain.RenderFilter{RequestedBy: editor.ID, Status: domain.RenderQueued}, one)
+	if err != nil {
+		t.Fatalf("list renders by status: %v", err)
+	}
+	if statusFilter.Total != 2 {
+		t.Fatalf("status-filtered total must match the editor's queued jobs, got %d", statusFilter.Total)
+	}
+
+	// A supervisor reading without the requested_by filter still sees the whole farm.
+	farm, err := store.Renders().List(ctx, domain.RenderFilter{}, page)
+	if err != nil {
+		t.Fatalf("list farm renders: %v", err)
+	}
+	if farm.Total != 7 {
+		t.Fatalf("unfiltered total must cover the whole farm, got %d", farm.Total)
+	}
+}
+
 func TestStateSurvivesReopeningTheDatabase(t *testing.T) {
 	dir := t.TempDir()
 	dsn := dsnFor(dir, "restart.db")

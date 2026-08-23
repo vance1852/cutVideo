@@ -132,9 +132,9 @@ func (r *renderRepo) List(ctx context.Context, filter domain.RenderFilter, page 
 	where, args := renderFilterClause(filter)
 	conn := r.store.conn(ctx)
 
-	// Counting the queue is a single index scan, so the envelope total is taken
-	// straight from the table instead of re-running the filter for every page.
-	total, err := r.countAll(ctx)
+	// The same WHERE fragment backs the count and the page query so the
+	// envelope total never disagrees with the rows a caller can see.
+	total, err := r.countFiltered(ctx, where, args)
 	if err != nil {
 		return empty, err
 	}
@@ -159,10 +159,11 @@ func (r *renderRepo) List(ctx context.Context, filter domain.RenderFilter, page 
 	return domain.NewPageResult(items, total, page), nil
 }
 
-// countAll reports how many render jobs the table holds.
-func (r *renderRepo) countAll(ctx context.Context) (int, error) {
+// countFiltered reports how many render jobs match the filter, scoping the
+// envelope total to the same rows the page query returns.
+func (r *renderRepo) countFiltered(ctx context.Context, where string, args []any) (int, error) {
 	var total int
-	if err := r.store.conn(ctx).QueryRowContext(ctx, "SELECT COUNT(*) FROM render_jobs").Scan(&total); err != nil {
+	if err := r.store.conn(ctx).QueryRowContext(ctx, "SELECT COUNT(*) FROM render_jobs "+where, args...).Scan(&total); err != nil {
 		return 0, translate(err, "renders.count")
 	}
 	return total, nil
