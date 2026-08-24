@@ -1111,3 +1111,69 @@ func TestQuarantinedFootageBlocksSealing(t *testing.T) {
 		t.Fatalf("a failed seal must not advance the project pointer: %v", projectAfter.body)
 	}
 }
+
+// Resealing a cut must flip the previous sealed version to superseded while the
+// new one becomes the active sealed cut the render farm accepts. A regression
+// in CurrentSealed used to supersede the version that was just sealed instead,
+// leaving the new cut unrenderable.
+func TestResealingSupersedesThePreviousCutAndKeepsNewVersionRenderable(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+	projectID, firstTimelineID := h.sealedCut(editorToken, "REEL12")
+
+	first := h.call(http.MethodGet, "/api/v1/timelines/"+firstTimelineID, editorToken, nil, nil)
+	if first.body["status"] != string(domain.TimelineSealed) {
+		t.Fatalf("first cut must be sealed, got %v", first.body)
+	}
+
+	assets := h.call(http.MethodGet, "/api/v1/projects/"+projectID+"/assets", editorToken, nil, nil)
+	items := assets.body["items"].([]any)
+	assetID := items[0].(map[string]any)["id"].(string)
+
+	draft := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/timelines", editorToken, map[string]any{
+		"notes": "client revision",
+	}, nil)
+	if draft.status != http.StatusCreated {
+		t.Fatalf("open second draft failed: %d %v", draft.status, draft.body)
+	}
+	secondTimelineID := h.stringField(draft, "id")
+
+	if added := h.call(http.MethodPost, "/api/v1/timelines/"+secondTimelineID+"/clips", editorToken, map[string]any{
+		"asset_id":      assetID,
+		"order_index":   0,
+		"source_in_ms":  0,
+		"source_out_ms": 12_000,
+		"track":         "program",
+		"speed_percent": 100,
+	}, nil); added.status != http.StatusCreated {
+		t.Fatalf("add clip to second draft failed: %d %v", added.status, added.body)
+	}
+
+	sealed := h.call(http.MethodPost, "/api/v1/timelines/"+secondTimelineID+"/seal", editorToken, nil, nil)
+	if sealed.status != http.StatusOK || sealed.body["status"] != string(domain.TimelineSealed) {
+		t.Fatalf("sealing the revised cut must succeed, got %d %v", sealed.status, sealed.body)
+	}
+
+	previousReloaded := h.call(http.MethodGet, "/api/v1/timelines/"+firstTimelineID, editorToken, nil, nil)
+	if previousReloaded.body["status"] != string(domain.TimelineSuperseded) {
+		t.Fatalf("the first sealed cut must be superseded, got %v", previousReloaded.body)
+	}
+	newReloaded := h.call(http.MethodGet, "/api/v1/timelines/"+secondTimelineID, editorToken, nil, nil)
+	if newReloaded.body["status"] != string(domain.TimelineSealed) {
+		t.Fatalf("the newly sealed cut must remain sealed, got %v", newReloaded.body)
+	}
+	project := h.call(http.MethodGet, "/api/v1/projects/"+projectID, editorToken, nil, nil)
+	if project.body["sealed_version"].(float64) != 2 {
+		t.Fatalf("the project pointer must name the revised cut, got %v", project.body)
+	}
+
+	submitted := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": secondTimelineID,
+		"preset":      "web_1080p",
+		"priority":    50,
+	}, nil)
+	if submitted.status != http.StatusAccepted {
+		t.Fatalf("the revised cut must be submittable for render, got %d %v", submitted.status, submitted.body)
+	}
+}

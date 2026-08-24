@@ -106,14 +106,17 @@ func (r *timelineRepo) LatestSealed(ctx context.Context, projectID string) (*dom
 	return version, nil
 }
 
-// CurrentSealed resolves the sealed cut a project currently advertises by joining
-// the project's sealed pointer with the timeline it names.
+// CurrentSealed resolves the sealed cut a project currently advertises by
+// joining the project's sealed pointer with the timeline it names. Reading the
+// pointer from the database keeps the lookup stable inside the caller's
+// transaction: while a new draft is being sealed the pointer still names the
+// previous cut, so the version to supersede is returned instead of the one that
+// was just sealed.
 func (r *timelineRepo) CurrentSealed(ctx context.Context, projectID string) (*domain.TimelineVersion, error) {
 	row := r.store.conn(ctx).QueryRowContext(ctx,
 		"SELECT "+timelineColumns+` FROM timeline_versions
-		 WHERE project_id = ? AND status = ?
-		 ORDER BY version DESC LIMIT 1`,
-		projectID, string(domain.TimelineSealed),
+		 WHERE project_id = ? AND version = (SELECT sealed_version FROM projects WHERE id = ?)`,
+		projectID, projectID,
 	)
 	version, err := scanTimeline(row)
 	if err != nil {
