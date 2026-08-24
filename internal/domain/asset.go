@@ -162,9 +162,12 @@ func (a *MediaAsset) Usable(now time.Time) error {
 	return nil
 }
 
-// Referenceable reports whether a cut may point at this footage. A reel that was
-// rejected at ingest never existed as far as the edit is concerned; everything
-// else stays available to the edit decision list.
+// Referenceable reports the weakest editorial gate: whether a cut may point at
+// this footage at all. A reel that was rejected at ingest never existed as far
+// as the edit is concerned; every other status (including quarantined or
+// archived reels) stays nominally referenceable here. Clip addition uses the
+// stricter Usable gate instead, so quarantined or archived footage is blocked
+// before it reaches the timeline rather than only at seal time.
 func (a *MediaAsset) Referenceable() error {
 	if a.Status == AssetRejected {
 		return ErrAssetUnusable

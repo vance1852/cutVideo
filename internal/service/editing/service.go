@@ -256,8 +256,12 @@ func (s *Service) AddClip(ctx context.Context, actor domain.Principal, input Add
 		if asset.ProjectID != project.ID {
 			return fmt.Errorf("editing: asset %s belongs to another project: %w", asset.ID, domain.ErrValidation)
 		}
-		if err := asset.Referenceable(); err != nil {
-			return err
+		// Gate the asset at add time with the same check sealing uses. A reel that
+		// was quarantined, archived, still ingesting, rejected or past retention
+		// must never reach the timeline, otherwise the rejection only surfaces at
+		// seal time without naming which clip is at fault.
+		if err := asset.Usable(now); err != nil {
+			return fmt.Errorf("editing: asset %s cannot back a clip: %w", asset.ID, err)
 		}
 		clip, err := domain.NewClip(s.gen.NewID("clp"), version.ID, asset.ID, input.OrderIndex,
 			input.SourceInMS, input.SourceOutMS, input.Track, input.Transition, input.SpeedPercent, now)
@@ -286,9 +290,32 @@ func (s *Service) AddClip(ctx context.Context, actor domain.Principal, input Add
 		return nil
 	})
 	if err != nil {
-		return nil, translate(err, "could not add the clip")
+		return nil, translateAddClipError(err, input.AssetID)
 	}
 	return updated, nil
+}
+
+// translateAddClipError maps an add-clip failure onto the public error contract.
+// Unusable footage surfaces the offending asset id so the editor knows exactly
+// which reference was rejected instead of discovering it clip by clip at seal
+// time.
+func translateAddClipError(err error, assetID string) error {
+	var public *apierr.Error
+	if errors.As(err, &public) {
+		return public
+	}
+	switch {
+	case errors.Is(err, domain.ErrAssetUnusable):
+		return apierr.Wrap(apierr.CodePreconditionFail,
+			"the footage cannot be used for editing and was quarantined, rejected or archived", err).
+			WithDetail("asset_id", assetID)
+	case errors.Is(err, domain.ErrRetentionExpired):
+		return apierr.Wrap(apierr.CodePreconditionFail,
+			"the footage has passed its retention window", err).
+			WithDetail("asset_id", assetID)
+	default:
+		return translate(err, "could not add the clip")
+	}
 }
 
 // RemoveClip deletes a clip from a draft timeline and refreshes the counters.

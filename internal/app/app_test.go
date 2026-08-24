@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vance1852/cutVideo/internal/apierr"
 	"github.com/vance1852/cutVideo/internal/app"
 	"github.com/vance1852/cutVideo/internal/clock"
 	"github.com/vance1852/cutVideo/internal/config"
@@ -1109,5 +1110,111 @@ func TestQuarantinedFootageBlocksSealing(t *testing.T) {
 	projectAfter := h.call(http.MethodGet, "/api/v1/projects/"+projectID, editorToken, nil, nil)
 	if projectAfter.body["sealed_version"].(float64) != 0 {
 		t.Fatalf("a failed seal must not advance the project pointer: %v", projectAfter.body)
+	}
+}
+
+func TestQuarantinedFootageBlockedAtClipAdd(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+
+	project := h.call(http.MethodPost, "/api/v1/projects", editorToken, map[string]any{
+		"code":        "QUAR02",
+		"title":       "Quarantine add gate",
+		"frame_rate":  25,
+		"resolution":  "1920x1080",
+		"deadline_at": h.clk.Now().Add(48 * time.Hour).Format(time.RFC3339),
+	}, nil)
+	projectID := h.stringField(project, "id")
+
+	// Two assets: one quarantined before assembly, one healthy.
+	badSum := strings.Repeat("8", 64)
+	badAsset := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/assets", editorToken, map[string]any{
+		"filename":          "drift.mov",
+		"format":            "mov",
+		"kind":              "video",
+		"declared_checksum": badSum,
+		"bytes":             8192,
+		"duration_ms":       20_000,
+	}, nil)
+	badAssetID := h.stringField(badAsset, "id")
+	if verified := h.call(http.MethodPost, "/api/v1/assets/"+badAssetID+"/verify", editorToken, map[string]any{
+		"observed_checksum": badSum,
+	}, nil); verified.status != http.StatusOK {
+		t.Fatalf("verify bad asset failed: %d %v", verified.status, verified.body)
+	}
+	if quarantined := h.call(http.MethodPost, "/api/v1/assets/"+badAssetID+"/quarantine", editorToken, map[string]any{
+		"reason": "audio drift",
+	}, nil); quarantined.status != http.StatusOK {
+		t.Fatalf("quarantine failed: %d %v", quarantined.status, quarantined.body)
+	}
+
+	goodSum := strings.Repeat("9", 64)
+	goodAsset := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/assets", editorToken, map[string]any{
+		"filename":          "clean.mov",
+		"format":            "mov",
+		"kind":              "video",
+		"declared_checksum": goodSum,
+		"bytes":             8192,
+		"duration_ms":       20_000,
+	}, nil)
+	goodAssetID := h.stringField(goodAsset, "id")
+	if verified := h.call(http.MethodPost, "/api/v1/assets/"+goodAssetID+"/verify", editorToken, map[string]any{
+		"observed_checksum": goodSum,
+	}, nil); verified.status != http.StatusOK {
+		t.Fatalf("verify good asset failed: %d %v", verified.status, verified.body)
+	}
+
+	draft := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/timelines", editorToken, map[string]any{
+		"notes": "blocked at add",
+	}, nil)
+	timelineID := h.stringField(draft, "id")
+
+	// Adding the quarantined footage must be rejected at the door, not at seal.
+	rejected := h.call(http.MethodPost, "/api/v1/timelines/"+timelineID+"/clips", editorToken, map[string]any{
+		"asset_id":      badAssetID,
+		"order_index":   0,
+		"source_in_ms":  0,
+		"source_out_ms": 10_000,
+		"track":         "program",
+		"speed_percent": 100,
+	}, nil)
+	if rejected.status != http.StatusPreconditionFailed {
+		t.Fatalf("quarantined footage must be blocked at add, got %d %v", rejected.status, rejected.body)
+	}
+	errBody, _ := rejected.body["error"].(map[string]any)
+	if errBody == nil {
+		t.Fatalf("expected an error envelope: %v", rejected.body)
+	}
+	if errBody["code"] != string(apierr.CodePreconditionFail) {
+		t.Fatalf("expected precondition_failed code, got %v", errBody["code"])
+	}
+	if details, _ := errBody["details"].(map[string]any); details["asset_id"] != badAssetID {
+		t.Fatalf("error must name the offending asset, got %v", errBody)
+	}
+	// The timeline must remain clipless and a draft after the rejected add.
+	timeline := h.call(http.MethodGet, "/api/v1/timelines/"+timelineID, editorToken, nil, nil)
+	if timeline.body["status"] != string(domain.TimelineDraft) {
+		t.Fatalf("rejected add must leave the draft untouched: %v", timeline.body)
+	}
+	if timeline.body["clip_count"].(float64) != 0 {
+		t.Fatalf("rejected add must not append a clip: %v", timeline.body)
+	}
+
+	// Healthy footage is added normally and seals.
+	added := h.call(http.MethodPost, "/api/v1/timelines/"+timelineID+"/clips", editorToken, map[string]any{
+		"asset_id":      goodAssetID,
+		"order_index":   0,
+		"source_in_ms":  0,
+		"source_out_ms": 10_000,
+		"track":         "program",
+		"speed_percent": 100,
+	}, nil)
+	if added.status != http.StatusCreated {
+		t.Fatalf("healthy footage must be added, got %d %v", added.status, added.body)
+	}
+	sealed := h.call(http.MethodPost, "/api/v1/timelines/"+timelineID+"/seal", editorToken, nil, nil)
+	if sealed.status != http.StatusOK || sealed.body["status"] != string(domain.TimelineSealed) {
+		t.Fatalf("healthy footage must seal, got %d %v", sealed.status, sealed.body)
 	}
 }

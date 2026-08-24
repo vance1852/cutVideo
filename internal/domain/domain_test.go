@@ -226,6 +226,43 @@ func TestTimelineSealRejectsQuarantinedFootage(t *testing.T) {
 	}
 }
 
+func TestAssetUsableGatesQuarantinedFootage(t *testing.T) {
+	asset := newTestAsset(t, "ast_q", 20_000)
+	if err := asset.Usable(reference()); err != nil {
+		t.Fatalf("verified asset must be usable: %v", err)
+	}
+	if err := asset.Quarantine("audio drift", reference()); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	if err := asset.Usable(reference()); !errors.Is(err, domain.ErrAssetUnusable) {
+		t.Fatalf("quarantined asset must be unusable, got %v", err)
+	}
+}
+
+func TestAssetUsableGatesArchivedFootage(t *testing.T) {
+	asset := newTestAsset(t, "ast_a", 20_000)
+	if err := asset.Archive(reference()); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if err := asset.Usable(reference()); !errors.Is(err, domain.ErrAssetUnusable) {
+		t.Fatalf("archived asset must be unusable, got %v", err)
+	}
+}
+
+func TestAssetUsableGatesIngestingFootage(t *testing.T) {
+	asset, err := domain.NewMediaAsset("ast_i", "prj_1", "raw.mov", "mov", domain.AssetKindVideo,
+		strings.Repeat("z", 64), 4096, 10_000, reference(), 48*time.Hour)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	if asset.Status != domain.AssetIngesting {
+		t.Fatalf("expected ingesting, got %s", asset.Status)
+	}
+	if err := asset.Usable(reference()); !errors.Is(err, domain.ErrAssetUnusable) {
+		t.Fatalf("ingesting asset must be unusable, got %v", err)
+	}
+}
+
 func TestTimelineSpeedRampChangesProgramDuration(t *testing.T) {
 	version, _ := domain.NewTimelineVersion("tml_3", "prj_1", 1, "usr_1", "", reference())
 	asset := newTestAsset(t, "ast_12", 60_000)
