@@ -1052,6 +1052,89 @@ func TestClipsCannotBeAddedToSealedTimeline(t *testing.T) {
 	}
 }
 
+func TestFrozenProjectBlocksEditorialChanges(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+	projectID, _ := h.sealedCut(editorToken, "FROZ01")
+
+	// Open a fresh draft so there is an editable timeline to attack.
+	draft := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/timelines", editorToken, map[string]any{
+		"notes": "second pass",
+	}, nil)
+	if draft.status != http.StatusCreated {
+		t.Fatalf("open draft failed: %d %v", draft.status, draft.body)
+	}
+	draftID := h.stringField(draft, "id")
+
+	locked := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/lock", editorToken, nil, nil)
+	if locked.status != http.StatusOK || locked.body["status"] != string(domain.ProjectLocked) {
+		t.Fatalf("lock failed: %d %v", locked.status, locked.body)
+	}
+
+	assets := h.call(http.MethodGet, "/api/v1/projects/"+projectID+"/assets", editorToken, nil, nil)
+	items := assets.body["items"].([]any)
+	assetID := items[0].(map[string]any)["id"].(string)
+
+	// Adding a clip to the open draft must be blocked while the project is frozen.
+	addClip := h.call(http.MethodPost, "/api/v1/timelines/"+draftID+"/clips", editorToken, map[string]any{
+		"asset_id":      assetID,
+		"order_index":   0,
+		"source_in_ms":  0,
+		"source_out_ms": 3_000,
+		"track":         "program",
+		"speed_percent":  100,
+	}, nil)
+	if addClip.status != http.StatusPreconditionFailed {
+		t.Fatalf("a frozen project must reject new clips, got %d %v", addClip.status, addClip.body)
+	}
+
+	// Ingesting new footage must be blocked as well.
+	ingest := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/assets", editorToken, map[string]any{
+		"filename":          "late.mov",
+		"format":            "mov",
+		"kind":              "video",
+		"declared_checksum": strings.Repeat("f", 64),
+		"bytes":             1 << 20,
+		"duration_ms":       10_000,
+	}, nil)
+	if ingest.status != http.StatusPreconditionFailed {
+		t.Fatalf("a frozen project must reject footage ingest, got %d %v", ingest.status, ingest.body)
+	}
+
+	// Sealing a new version, which would move the sealed pointer, must be blocked.
+	seal := h.call(http.MethodPost, "/api/v1/timelines/"+draftID+"/seal", editorToken, nil, nil)
+	if seal.status != http.StatusPreconditionFailed {
+		t.Fatalf("a frozen project must reject sealing, got %d %v", seal.status, seal.body)
+	}
+
+	// The project must still report the original sealed version untouched.
+	project := h.call(http.MethodGet, "/api/v1/projects/"+projectID, editorToken, nil, nil)
+	if project.body["status"] != string(domain.ProjectLocked) {
+		t.Fatalf("project must stay locked: %v", project.body)
+	}
+	if project.body["sealed_version"].(float64) != 1 {
+		t.Fatalf("the sealed pointer must not move while frozen: %v", project.body)
+	}
+
+	// Unlocking restores editorial changes.
+	unlocked := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/unlock", editorToken, nil, nil)
+	if unlocked.status != http.StatusOK || unlocked.body["status"] != string(domain.ProjectActive) {
+		t.Fatalf("unlock failed: %d %v", unlocked.status, unlocked.body)
+	}
+	retry := h.call(http.MethodPost, "/api/v1/timelines/"+draftID+"/clips", editorToken, map[string]any{
+		"asset_id":      assetID,
+		"order_index":   0,
+		"source_in_ms":  0,
+		"source_out_ms": 3_000,
+		"track":         "program",
+		"speed_percent":  100,
+	}, nil)
+	if retry.status != http.StatusCreated {
+		t.Fatalf("an unlocked project must accept clips again, got %d %v", retry.status, retry.body)
+	}
+}
+
 func TestQuarantinedFootageBlocksSealing(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)

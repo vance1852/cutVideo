@@ -266,8 +266,9 @@ func (s *Service) loadWritableProject(ctx context.Context, actor domain.Principa
 	if err := project.EnsureWriteAccess(actor); err != nil {
 		return nil, apierr.Wrap(apierr.CodeForbidden, "you may not change footage on this project", err)
 	}
-	// Footage keeps flowing in while a master render is in flight; the editorial
-	// freeze only concerns the cut itself.
+	if err := project.EnsureEditable(); err != nil {
+		return nil, s.translate(err, "the project is frozen for a master render")
+	}
 	return project, nil
 }
 

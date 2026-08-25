@@ -158,15 +158,20 @@ func (s *Service) UnlockProject(ctx context.Context, actor domain.Principal, pro
 	return unlocked, nil
 }
 
-// writableProject loads a project the caller may change. Editorial preparation of
-// the next revision continues while a master render is in flight, so the loading
-// path only settles who may write.
+// writableProject loads a project the caller may change and refuses the
+// operation while the project is frozen. A frozen project no longer accepts
+// any editorial change: drafting, clip assembly and sealing all move the sealed
+// pointer the render farm depends on, so they are blocked until the project is
+// unlocked again.
 func (s *Service) writableProject(ctx context.Context, actor domain.Principal, projectID string) (*domain.Project, error) {
 	project, err := s.store.Projects().GetByID(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
 	if err := project.EnsureWriteAccess(actor); err != nil {
+		return nil, err
+	}
+	if err := project.EnsureEditable(); err != nil {
 		return nil, err
 	}
 	return project, nil
@@ -302,11 +307,7 @@ func (s *Service) RemoveClip(ctx context.Context, actor domain.Principal, timeli
 		if err != nil {
 			return err
 		}
-		project, err := s.store.Projects().GetByID(txCtx, version.ProjectID)
-		if err != nil {
-			return err
-		}
-		if err := project.EnsureWriteAccess(actor); err != nil {
+		if _, err := s.writableProject(txCtx, actor, version.ProjectID); err != nil {
 			return err
 		}
 		if err := version.EnsureEditable(); err != nil {
