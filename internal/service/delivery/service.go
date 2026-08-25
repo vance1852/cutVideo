@@ -204,21 +204,10 @@ func (s *Service) dispatchOne(ctx context.Context, actor domain.Principal, job *
 		outcome.Failure = "destination disabled"
 		return outcome
 	}
-	if record.Status == domain.DeliveryFailed {
-		// An operator asked for another distribution round, so the destination gets
-		// a clean cycle instead of inheriting the previous round's bookkeeping.
-		if err := s.store.InTx(ctx, func(txCtx context.Context) error {
-			if err := record.Reopen(now); err != nil {
-				return err
-			}
-			return s.store.Deliveries().UpdateRecord(txCtx, record)
-		}); err != nil {
-			outcome.Status = domain.DeliveryFailed
-			outcome.Failure = "could not reopen the delivery"
-			return outcome
-		}
-	}
 	if record.Exhausted() {
+		// The attempt budget is spent. Stop calling the downstream so an operator
+		// retrying a refusing destination cannot keep hammering it; the record keeps
+		// its accumulated attempt count and failed status to make the state visible.
 		outcome.Status = domain.DeliveryFailed
 		outcome.Failure = "delivery attempts are exhausted"
 		return outcome

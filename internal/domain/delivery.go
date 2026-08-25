@@ -228,20 +228,6 @@ func (r *DeliveryRecord) Skip(reason string, now time.Time) error {
 	return nil
 }
 
-// Reopen returns a refused delivery to the pending state so a later dispatch
-// round starts a clean cycle against the destination.
-func (r *DeliveryRecord) Reopen(now time.Time) error {
-	if r.Status != DeliveryFailed {
-		return NewTransitionError("delivery", string(r.Status), string(DeliveryPending), "only refused deliveries can be reopened")
-	}
-	r.Status = DeliveryPending
-	r.Attempt = 0
-	r.Failure = ""
-	r.DispatchedAt = nil
-	r.UpdatedAt = now
-	return nil
-}
-
 // Exhausted reports whether no further dispatch attempt is allowed.
 func (r *DeliveryRecord) Exhausted() bool { return r.Attempt >= r.MaxAttempts }
 

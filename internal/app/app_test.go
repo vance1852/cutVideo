@@ -910,6 +910,92 @@ func TestDeliveryDispatchReportsPartialFailureAndSkipsDisabledTargets(t *testing
 	}
 }
 
+func TestDeliveryRetryAccumulatesThenStopsCallingRefusingDestination(t *testing.T) {
+	// The archive destination refuses every transfer. Each operator "re-dispatch"
+	// must accumulate the attempt counter instead of restarting from one, and once
+	// the budget is spent it must stop hitting that endpoint while leaving a
+	// destination that already confirmed untouched.
+	transport := &delivery.StubTransport{Failures: map[string]error{
+		"archive": errors.New("aspera endpoint refused the transfer"),
+	}}
+	h := newHarness(t, harnessOptions{transport: transport})
+	supervisorToken := h.signIn(supervisorEmail, supervisorPassword)
+	editorToken := h.provisionEditor(supervisorToken)
+	projectID, timelineID := h.sealedCut(editorToken, "REEL42")
+
+	for _, entry := range []struct {
+		name string
+		kind string
+	}{
+		{"broadcast", "webhook"},
+		{"archive", "aspera"},
+	} {
+		created := h.call(http.MethodPost, "/api/v1/projects/"+projectID+"/delivery-targets", supervisorToken, map[string]any{
+			"name":           entry.name,
+			"kind":           entry.kind,
+			"endpoint":       "https://" + entry.name + ".invalid/ingest",
+			"credential_ref": "vault://" + entry.name,
+		}, nil)
+		if created.status != http.StatusCreated {
+			t.Fatalf("create target %s failed: %d %v", entry.name, created.status, created.body)
+		}
+	}
+
+	submitted := h.call(http.MethodPost, "/api/v1/renders", editorToken, map[string]any{
+		"timeline_id": timelineID, "preset": "web_1080p",
+	}, nil)
+	jobID := h.stringField(submitted, "id")
+	if _, err := h.app.Workers.ProcessOnce(context.Background()); err != nil {
+		t.Fatalf("worker cycle: %v", err)
+	}
+
+	sentBefore := len(transport.Sent)
+	// Three re-dispatch rounds: each must reach the refusing archive destination
+	// and add one attempt, broadcast confirms again on the first round only.
+	for round := 1; round <= 3; round++ {
+		dispatch := h.call(http.MethodPost, "/api/v1/renders/"+jobID+"/deliveries/dispatch", editorToken, nil, nil)
+		if dispatch.status != http.StatusMultiStatus {
+			t.Fatalf("round %d: expected 207 for a partial delivery, got %d %v", round, dispatch.status, dispatch.body)
+		}
+		if dispatch.body["failed"].(float64) != 1 {
+			t.Fatalf("round %d: archive must still be reported as failed: %v", round, dispatch.body)
+		}
+		records := h.call(http.MethodGet, "/api/v1/renders/"+jobID+"/deliveries", editorToken, nil, nil)
+		var archiveAttempt float64
+		for _, item := range records.body["items"].([]any) {
+			rec := item.(map[string]any)
+			if rec["status"] == string(domain.DeliveryConfirmed) {
+				continue
+			}
+			archiveAttempt = rec["attempt"].(float64)
+		}
+		if archiveAttempt != float64(round) {
+			t.Fatalf("round %d: archive attempt must accumulate to %d, got %v", round, round, archiveAttempt)
+		}
+	}
+
+	// A fourth round must not call the now-exhausted destination again.
+	sentAfterExhausted := len(transport.Sent)
+	if sentAfterExhausted-sentBefore != 1 {
+		t.Fatalf("only the first round should have reached the confirmed destination, sent %d times", sentAfterExhausted-sentBefore)
+	}
+	dispatch := h.call(http.MethodPost, "/api/v1/renders/"+jobID+"/deliveries/dispatch", editorToken, nil, nil)
+	if dispatch.status != http.StatusMultiStatus {
+		t.Fatalf("fourth round: expected 207, got %d %v", dispatch.status, dispatch.body)
+	}
+	if len(transport.Sent) != sentAfterExhausted {
+		t.Fatalf("exhausted destination must not be called again, sent delta %d", len(transport.Sent)-sentAfterExhausted)
+	}
+	if dispatch.body["failed"].(float64) != 1 {
+		t.Fatalf("fourth round: archive must remain failed: %v", dispatch.body)
+	}
+	// The refusing destination never confirmed, so the project stays undelivered.
+	project := h.call(http.MethodGet, "/api/v1/projects/"+projectID, editorToken, nil, nil)
+	if project.body["status"] == string(domain.ProjectDelivered) {
+		t.Fatalf("a project with a refusing destination must not be marked delivered")
+	}
+}
+
 func TestHTTPTransportPropagatesDownstreamRejection(t *testing.T) {
 	var received int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

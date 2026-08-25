@@ -429,6 +429,36 @@ func TestDeliveryRecordAttemptBudget(t *testing.T) {
 	}
 }
 
+func TestDeliveryRecordRetriesAccumulateUntilExhausted(t *testing.T) {
+	record, err := domain.NewDeliveryRecord("dlv_2", "rnd_1", "dst_1", "prj_1", "cutvideo://out.mov", 3, reference())
+	if err != nil {
+		t.Fatalf("new record: %v", err)
+	}
+	// Three dispatch rounds that each fail must add up to the budget, never
+	// restarting from one, so a refusing destination is not hammered forever.
+	for attempt := 1; attempt <= 3; attempt++ {
+		if record.Exhausted() {
+			t.Fatalf("attempt %d must still be allowed", attempt)
+		}
+		if err := record.MarkDispatched(reference()); err != nil {
+			t.Fatalf("dispatch %d: %v", attempt, err)
+		}
+		if record.Attempt != attempt {
+			t.Fatalf("dispatch must accumulate, got attempt %d want %d", record.Attempt, attempt)
+		}
+		if err := record.MarkFailed("destination refused", reference()); err != nil {
+			t.Fatalf("fail %d: %v", attempt, err)
+		}
+	}
+	if !record.Exhausted() {
+		t.Fatal("three attempts must exhaust the budget")
+	}
+	// Once exhausted, no further dispatch is allowed, so no outbound call is made.
+	if err := record.MarkDispatched(reference()); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("dispatch past the budget must be rejected, got %v", err)
+	}
+}
+
 func TestPageValidation(t *testing.T) {
 	if _, err := domain.NewPage(1, 500, "created_at", domain.SortAscending); !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("oversized page must be rejected, got %v", err)
