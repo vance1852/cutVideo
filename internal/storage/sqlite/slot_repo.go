@@ -34,42 +34,34 @@ func (r *slotRepo) GetByID(ctx context.Context, id string) (*domain.RenderSlot, 
 	return scanSlot(row)
 }
 
-// ReserveIdle claims one idle slot for the job with a single conditional update.
-// Two concurrent claims cannot both win because the WHERE clause only matches a
-// row that is still idle and unheld. When the preferred pool has nothing free the
-// farm falls back to any idle seat so queued work does not wait for hardware that
-// is standing around.
+// ReserveIdle claims one idle slot in the given pool for the job with a single
+// conditional update. Two concurrent claims cannot both win because the WHERE
+// clause only matches a row that is still idle and unheld. Pools are strictly
+// isolated: when the requested pool has nothing free the farm reports itself full
+// instead of borrowing idle seats that belong to a different pool, so a
+// dedicated line (long-term archive, preview, etc.) never serves another line's
+// work and each pool's capacity board reflects only its own seats.
 func (r *slotRepo) ReserveIdle(ctx context.Context, pool, jobID string, now time.Time) (*domain.RenderSlot, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return nil, domain.NewValidationError("job_id", "must not be empty")
 	}
+	scope := strings.TrimSpace(pool)
 	conn := r.store.conn(ctx)
-	scopes := []string{strings.TrimSpace(pool)}
-	if scopes[0] != "" {
-		scopes = append(scopes, "")
-	}
 	for attempt := 0; attempt < 8; attempt++ {
-		var candidate string
-		located := false
-		for _, scope := range scopes {
-			query := `SELECT id FROM render_slots WHERE status = ? AND held_by_job_id = ''`
-			args := []any{string(domain.SlotIdle)}
-			if scope != "" {
-				query += " AND pool = ?"
-				args = append(args, scope)
-			}
-			query += " ORDER BY units DESC, name ASC LIMIT 1"
-			err := conn.QueryRowContext(ctx, query, args...).Scan(&candidate)
-			if err == nil {
-				located = true
-				break
-			}
-			if err != sql.ErrNoRows {
-				return nil, translate(err, "slots.reserve")
-			}
+		query := `SELECT id FROM render_slots WHERE status = ? AND held_by_job_id = ''`
+		args := []any{string(domain.SlotIdle)}
+		if scope != "" {
+			query += " AND pool = ?"
+			args = append(args, scope)
 		}
-		if !located {
+		query += " ORDER BY units DESC, name ASC LIMIT 1"
+		var candidate string
+		err := conn.QueryRowContext(ctx, query, args...).Scan(&candidate)
+		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("slots.reserve: %w", domain.ErrCapacityExhausted)
+		}
+		if err != nil {
+			return nil, translate(err, "slots.reserve")
 		}
 		result, err := conn.ExecContext(ctx,
 			`UPDATE render_slots SET status = ?, held_by_job_id = ?, leased_at = ?, released_at = NULL, updated_at = ?

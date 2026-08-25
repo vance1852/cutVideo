@@ -337,6 +337,58 @@ func TestReserveIdleReportsExhaustedCapacity(t *testing.T) {
 	}
 }
 
+func TestReserveIdleDoesNotBorrowAcrossPools(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	archive, err := domain.NewRenderSlot("slt_archive", "archive-01", "archive", 4, testTime())
+	if err != nil {
+		t.Fatalf("new archive slot: %v", err)
+	}
+	if err := store.Slots().Create(ctx, archive); err != nil {
+		t.Fatalf("create archive slot: %v", err)
+	}
+
+	// The primary pool has no seats at all. A claim on primary must report the
+	// pool full rather than grabbing the archive line's dedicated machine.
+	if _, err := store.Slots().ReserveIdle(ctx, "primary", "rnd_primary", testTime()); !errors.Is(err, domain.ErrCapacityExhausted) {
+		t.Fatalf("primary claim must be full, got %v", err)
+	}
+
+	// The archive seat is still idle and unheld: it was never borrowed.
+	stored, err := store.Slots().GetByID(ctx, archive.ID)
+	if err != nil {
+		t.Fatalf("reload archive slot: %v", err)
+	}
+	if !stored.Available() {
+		t.Fatalf("archive slot must remain available, got %+v", stored)
+	}
+
+	// An archive claim must succeed against its own pool.
+	reserved, err := store.Slots().ReserveIdle(ctx, "archive", "rnd_archive", testTime())
+	if err != nil {
+		t.Fatalf("archive claim: %v", err)
+	}
+	if reserved.ID != archive.ID {
+		t.Fatalf("archive claim picked the wrong seat: %+v", reserved)
+	}
+
+	// Now the archive pool is saturated; a further archive claim reports full,
+	// still without touching any other pool.
+	if _, err := store.Slots().ReserveIdle(ctx, "archive", "rnd_archive2", testTime()); !errors.Is(err, domain.ErrCapacityExhausted) {
+		t.Fatalf("archive claim must be full, got %v", err)
+	}
+
+	// The capacity board reflects only the archive pool's own seats.
+	capacity, err := store.Slots().Capacity(ctx, "archive")
+	if err != nil {
+		t.Fatalf("archive capacity: %v", err)
+	}
+	if capacity.Total != 1 || capacity.Idle != 0 || capacity.Busy != 1 || !capacity.Saturated() {
+		t.Fatalf("archive capacity must show one busy seat, got %+v", capacity)
+	}
+}
+
 func TestRenderQueueOrderingAndLeaseQueries(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()

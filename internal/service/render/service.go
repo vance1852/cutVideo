@@ -140,8 +140,11 @@ func (s *Service) Claim(ctx context.Context, pool string) (*domain.RenderJob, er
 			return nil
 		}
 		job := candidates[0]
-		// Let the farm pick the seat: the queue only cares that the encode starts.
-		slot, err := s.store.Slots().ReserveIdle(txCtx, "", job.ID, now)
+		// Reserve a seat in the worker's own pool only. Pools are isolated by
+		// design: a saturated pool must report itself full instead of borrowing
+		// idle hardware that belongs to another pool (the archive line keeps its
+		// dedicated machine for archive work).
+		slot, err := s.store.Slots().ReserveIdle(txCtx, pool, job.ID, now)
 		if err != nil {
 			return err
 		}
